@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+models/
+runs/
+figures/
+*.pt
+*.pdf
+.DS_Store
