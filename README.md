@@ -34,16 +34,15 @@ Requires HuggingFace access to gated Llama models.
 Download the trained 3B model from [HuggingFace](https://huggingface.co/nmysore/attention-manifolds):
 
 ```bash
-mkdir -p models
-huggingface-cli download nmysore/attention-manifolds --local-dir models/attention-manifolds
+python download_models.py
 ```
 
 Run interactive inference:
 
 ```bash
 python interactive_infer.py \
-  --checkpoint models/attention-manifolds/trained \
-  --calibrated models/attention-manifolds/calibrated \
+  --checkpoint models/trained \
+  --calibrated models/calibrated \
   --max-tokens 200 --device cuda
 ```
 
@@ -213,6 +212,7 @@ attention_manifolds/
   calibrate_qk.py         # Step 1: calibration
   train_qk_curves.py      # Step 2: training
   interactive_infer.py     # Step 3: inference + interventions
+  download_models.py       # Download trained checkpoints from HuggingFace
   test_spline_qk.py       # Unit tests
   requirements.txt
   evaluation/
