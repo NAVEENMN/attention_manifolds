@@ -1,5 +1,9 @@
 # Attention Manifolds
 
+<p align="center">
+  <img src="assets/ai_safety.gif" alt="Interactive inference with spline interventions"/>
+</p>
+
 **Learned B-spline coordinate curves for AI safety and mechanistic interpretability.**
 
 Each projected query and key coordinate in transformer attention is wrapped with a learned cubic B-spline curve. The original linear projection is frozen; the spline reshapes each coordinate independently, initialized as the identity function `f(z) = z`. Only curve coefficients are trained — the backbone remains unchanged.
