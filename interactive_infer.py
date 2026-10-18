@@ -1,27 +1,7 @@
-"""Interactive inference with live intervention control.
-
-Usage:
-  # Normal inference
-  python interactive_infer.py --checkpoint models/1b_trained --device mps
-
-  # Start with negation, switch interventions interactively
-  python interactive_infer.py --checkpoint models/1b_trained \
-    --calibrated models/1b_calibrated --device mps
-
-Interactive commands (type these instead of a prompt):
-  /negate-all            Negate all layers
-  /negate 0 3 6          Negate specific layers
-  /scale 2.0             Scale all layers by alpha
-  /scale -1.0 0 3 6      Scale specific layers
-  /revert 0 3            Revert specific layers to identity
-  /off                   Turn off intervention (normal inference)
-  /compare               Toggle compare mode (show both baseline and intervened)
-  /sensitivity <prompt>  Run per-layer sensitivity for a prompt
-  /tokens 100            Set max generation tokens
-  /quit                  Exit
-"""
+"""Attention Manifolds — Interactive Inference"""
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -29,17 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from spline_qk import load_splines, SplineProjection
 
 
-def load_model(checkpoint, device):
-    manifest = json.loads((Path(checkpoint) / 'manifest.json').read_text())
-    meta = manifest['metadata']
-    model = AutoModelForCausalLM.from_pretrained(
-        meta['model'], dtype=torch.float32, attn_implementation='eager'
-    ).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(meta['model'])
-    load_splines(checkpoint, model)
-    model.eval()
-    return model, tokenizer, meta
-
+# ── Helpers ──────────────────────────────────────────────────────────────
 
 def get_all_coefficients(model):
     coeffs = {}
@@ -71,15 +41,12 @@ def clear_memory(device):
     gc.collect()
 
 
-def generate(model, tokenizer, ids, max_tokens=200, device='cpu'):
+def generate(model, tokenizer, ids, max_tokens, device):
     with torch.no_grad():
         out = model.generate(
-            input_ids=ids,
-            attention_mask=torch.ones_like(ids),
-            max_new_tokens=max_tokens,
-            do_sample=False,
-            use_cache=True,
-            pad_token_id=tokenizer.eos_token_id,
+            input_ids=ids, attention_mask=torch.ones_like(ids),
+            max_new_tokens=max_tokens, do_sample=False,
+            use_cache=True, pad_token_id=tokenizer.eos_token_id,
         )
     text = tokenizer.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
     del out
@@ -97,6 +64,32 @@ def encode_prompt(tokenizer, prompt, device):
     return ids.to(device)
 
 
+# ── Formatting ───────────────────────────────────────────────────────────
+
+def divider(label=''):
+    w = 72
+    if label:
+        pad = w - len(label) - 4
+        left = pad // 2
+        right = pad - left
+        return f"{'─' * left}  {label}  {'─' * right}"
+    return '─' * w
+
+
+def print_response(text, label, model_name, tag=''):
+    header = model_name
+    if tag:
+        header = f"{tag} | {model_name}"
+    print(f"\n{divider(header)}")
+    print(f"  [{label}]")
+    print()
+    for line in text.split('\n'):
+        print(f"  {line}")
+    print(f"\n{divider()}")
+
+
+# ── Intervention State ───────────────────────────────────────────────────
+
 class InterventionState:
     def __init__(self, model, calibrated_coeffs):
         self.model = model
@@ -112,10 +105,8 @@ class InterventionState:
         if self.mode == 'off' or self.calibrated is None:
             self._restore_all()
             return
-
         self._restore_all()
         layers = list(range(self.n_layers)) if self.mode == 'negate-all' else self.layers
-
         coeffs = get_all_coefficients(self.model)
         for (i, kind), coeff in coeffs.items():
             if i not in layers:
@@ -136,69 +127,67 @@ class InterventionState:
         for k, v in self.trained.items():
             coeffs[k].copy_(v)
 
-    def describe(self):
+    def status(self):
         if self.mode == 'off':
-            return 'OFF (normal inference)'
-        layer_str = 'all' if self.mode == 'negate-all' else str(self.layers)
+            return ''
+        if self.mode == 'negate-all':
+            return 'negate-all'
+        layer_str = ','.join(str(l) for l in self.layers)
         if self.mode == 'scale':
-            return f'scale alpha={self.alpha} layers={layer_str}'
-        return f'{self.mode} layers={layer_str}'
+            return f'scale {self.alpha:+.1f} L[{layer_str}]'
+        return f'{self.mode} L[{layer_str}]'
 
+
+# ── Analysis Commands ────────────────────────────────────────────────────
 
 def run_sensitivity(model, tokenizer, state, prompt, device, max_tokens):
-    """Per-layer sensitivity: negate one layer at a time."""
     if state.calibrated is None:
-        print('  [needs --calibrated to run sensitivity]')
+        print('  Needs --calibrated')
         return
 
     ids = encode_prompt(tokenizer, prompt, device)
-
-    # Baseline
     state._restore_all()
     base_text = generate(model, tokenizer, ids, max_tokens, device)
     base_label = classify(base_text)
-    print(f'\n  Baseline: {base_label} - {base_text[:100]}')
-    print(f'\n  {"Layer":>5}  {"Label":>7}  {"Changed":>7}  Response')
-    print('  ' + '-' * 70)
+
+    print(f"\n{divider('sensitivity')}")
+    print(f"  Baseline: {base_label}")
+    print()
+    print(f"  {'Layer':>5}  {'Result':>7}  Response")
+    print(f"  {'─'*60}")
 
     coeffs = get_all_coefficients(model)
     for layer in range(state.n_layers):
-        # Negate just this layer
         for kind in ('q', 'k'):
             key = (layer, kind)
             if key in state.trained and key in state.calibrated:
                 coeffs[key].copy_(2 * state.calibrated[key] - state.trained[key])
-
         text = generate(model, tokenizer, ids, max_tokens, device)
         label = classify(text)
-        changed = '*' if label != base_label else ' '
-
-        # Restore this layer
         for kind in ('q', 'k'):
             key = (layer, kind)
             if key in state.trained:
                 coeffs[key].copy_(state.trained[key])
+        mark = ' ◀' if label != base_label else ''
+        short = text[:55].replace('\n', ' ')
+        print(f"  {layer:5d}  {label:>7}  {short}{mark}")
 
-        short = text[:60].replace('\n', ' ')
-        print(f'  {layer:5d}  {label:>7}  {changed:>7}  {short}')
-
-    print()
+    print(f"{divider()}\n")
 
 
 def run_sweep(model, tokenizer, state, prompt, device, max_tokens, layers=None):
-    """Sweep alpha × layer combinations. Shows which layers at which alpha flip behavior."""
     if state.calibrated is None:
-        print('  [needs --calibrated to run sweep]')
+        print('  Needs --calibrated')
         return
 
     ids = encode_prompt(tokenizer, prompt, device)
     alphas = [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
     coeffs = get_all_coefficients(model)
 
-    # Phase 1: All-layer sweep to find which alphas matter
-    print(f'\n  === All-layer alpha sweep: "{prompt[:50]}" ===')
-    print(f'  {"Alpha":>6}  {"Label":>7}  Response')
-    print('  ' + '-' * 70)
+    # Phase 1: all-layer sweep
+    print(f"\n{divider('alpha sweep (all layers)')}")
+    print(f"  {'Alpha':>6}  {'Result':>7}  Response")
+    print(f"  {'─'*60}")
 
     baseline_label = None
     for alpha in alphas:
@@ -207,147 +196,116 @@ def run_sweep(model, tokenizer, state, prompt, device, max_tokens, layers=None):
             cal = state.calibrated.get((i, kind))
             if cal is None:
                 continue
-            delta = state.trained[(i, kind)] - cal
-            coeff.copy_(cal + alpha * delta)
-
+            coeff.copy_(cal + alpha * (state.trained[(i, kind)] - cal))
         text = generate(model, tokenizer, ids, max_tokens, device)
         label = classify(text)
         if alpha == 1.0:
             baseline_label = label
-        marker = ' <-- baseline' if alpha == 1.0 else (' *FLIP*' if baseline_label and label != baseline_label else '')
-        short = text[:55].replace('\n', ' ')
-        print(f'  {alpha:+5.1f}  {label:>7}  {short}{marker}')
-
+        mark = ' ◀ baseline' if alpha == 1.0 else (' ★ FLIP' if baseline_label and label != baseline_label else '')
+        short = text[:50].replace('\n', ' ')
+        print(f"  {alpha:+5.1f}  {label:>7}  {short}{mark}")
     state._restore_all()
 
-    # Phase 2: Per-layer sweep — for each layer, which alpha flips it?
+    # Phase 2: per-layer
     target_layers = layers if layers else list(range(state.n_layers))
-    print(f'\n  === Per-layer sensitivity at alpha=-1.0 ===')
-    print(f'  {"Layer":>5}  {"Baseline":>8}  {"Negated":>8}  {"Flipped":>7}')
-    print('  ' + '-' * 40)
+    print(f"\n{divider('per-layer (alpha=-1)')}")
+    print(f"  {'Layer':>5}  {'Result':>7}")
+    print(f"  {'─'*25}")
 
-    sensitive_layers = []
+    sensitive = []
     for layer in target_layers:
-        # Negate just this layer
         state._restore_all()
         for kind in ('q', 'k'):
             key = (layer, kind)
             if key in state.trained and key in state.calibrated:
                 coeffs[key].copy_(2 * state.calibrated[key] - state.trained[key])
-
         text = generate(model, tokenizer, ids, max_tokens, device)
         label = classify(text)
         flipped = label != baseline_label
         if flipped:
-            sensitive_layers.append(layer)
-
-        # Restore
+            sensitive.append(layer)
         for kind in ('q', 'k'):
             key = (layer, kind)
             if key in state.trained:
                 coeffs[key].copy_(state.trained[key])
+        mark = ' ◀' if flipped else ''
+        print(f"  {layer:5d}  {label:>7}{mark}")
 
-        marker = '  *' if flipped else ''
-        print(f'  {layer:5d}  {baseline_label:>8}  {label:>8}  {marker}')
-
-    # Phase 3: If sensitive layers found, sweep alpha on just those
-    if sensitive_layers:
-        print(f'\n  === Alpha sweep on sensitive layers {sensitive_layers} ===')
-        print(f'  {"Alpha":>6}  {"Label":>7}  Response')
-        print('  ' + '-' * 70)
-
+    # Phase 3
+    if sensitive:
+        print(f"\n{divider(f'sweep on layers {sensitive}')}")
+        print(f"  {'Alpha':>6}  {'Result':>7}  Response")
+        print(f"  {'─'*60}")
         for alpha in alphas:
             state._restore_all()
             for (i, kind), coeff in coeffs.items():
-                if i not in sensitive_layers:
+                if i not in sensitive:
                     continue
                 cal = state.calibrated.get((i, kind))
                 if cal is None:
                     continue
-                delta = state.trained[(i, kind)] - cal
-                coeff.copy_(cal + alpha * delta)
-
+                coeff.copy_(cal + alpha * (state.trained[(i, kind)] - cal))
             text = generate(model, tokenizer, ids, max_tokens, device)
             label = classify(text)
-            marker = ' <-- baseline' if alpha == 1.0 else (' *FLIP*' if label != baseline_label else '')
-            short = text[:55].replace('\n', ' ')
-            print(f'  {alpha:+5.1f}  {label:>7}  {short}{marker}')
-
+            mark = ' ◀ baseline' if alpha == 1.0 else (' ★ FLIP' if label != baseline_label else '')
+            short = text[:50].replace('\n', ' ')
+            print(f"  {alpha:+5.1f}  {label:>7}  {short}{mark}")
         state._restore_all()
-        print(f'\n  Suggestion: /scale <alpha> {" ".join(str(l) for l in sensitive_layers)}')
+        layers_str = ' '.join(str(l) for l in sensitive)
+        print(f"\n  Try: /scale <alpha> {layers_str}")
     else:
-        # No single layer flips — try growing combinations
-        print(f'\n  === Combination search (no single layer flips) ===')
-
-        # Rank layers by how much they shift the output (even if not flipping)
-        # Use the per-layer labels we already computed — layers that changed wording
-        # are more likely to contribute to a combination flip.
-        # Try cumulative: add layers one at a time, most-changed first,
-        # until we get a flip or run out.
-
-        # First, score each layer by running negate and measuring label
-        layer_scores = []
-        for layer in target_layers:
-            state._restore_all()
-            for kind in ('q', 'k'):
-                key = (layer, kind)
-                if key in state.trained and key in state.calibrated:
-                    coeffs[key].copy_(2 * state.calibrated[key] - state.trained[key])
-
-            text = generate(model, tokenizer, ids, max_tokens, device)
-            # Score: did the first few words change from baseline?
-            layer_scores.append((layer, text[:30]))
-
-            for kind in ('q', 'k'):
-                key = (layer, kind)
-                if key in state.trained:
-                    coeffs[key].copy_(state.trained[key])
-
-        # Try cumulative combinations: 2, 4, 8, all layers
-        combo_sizes = [2, 4, 8, len(target_layers) // 2, len(target_layers)]
-        combo_sizes = sorted(set(c for c in combo_sizes if 2 <= c <= len(target_layers)))
-
-        # Use evenly-spaced layers for combinations (spread across the network)
-        found_combo = None
-        print(f'  {"Layers negated":>20}  {"Label":>7}  Response')
-        print('  ' + '-' * 70)
-
+        # Combination search
+        print(f"\n{divider('combination search')}")
+        print(f"  {'Layers':>20}  {'Result':>7}")
+        print(f"  {'─'*35}")
+        combo_sizes = sorted(set(c for c in [2, 4, 8, len(target_layers)//2, len(target_layers)] if 2 <= c <= len(target_layers)))
+        found = None
         for size in combo_sizes:
-            # Pick evenly spaced layers
             step = max(1, len(target_layers) // size)
             combo = target_layers[::step][:size]
-
             state._restore_all()
             for layer in combo:
                 for kind in ('q', 'k'):
                     key = (layer, kind)
                     if key in state.trained and key in state.calibrated:
                         coeffs[key].copy_(2 * state.calibrated[key] - state.trained[key])
-
             text = generate(model, tokenizer, ids, max_tokens, device)
             label = classify(text)
             flipped = label != baseline_label
-            short = text[:50].replace('\n', ' ')
-            marker = ' *FLIP*' if flipped else ''
-            print(f'  {str(combo):>20}  {label:>7}  {short}{marker}')
-
-            if flipped and found_combo is None:
-                found_combo = combo
-
+            mark = ' ★ FLIP' if flipped else ''
+            print(f"  {str(combo):>20}  {label:>7}{mark}")
+            if flipped and found is None:
+                found = combo
             state._restore_all()
-
-        if found_combo:
-            print(f'\n  Smallest flipping combination: {found_combo}')
-            print(f'  Suggestion: /negate {" ".join(str(l) for l in found_combo)}')
+        if found:
+            print(f"\n  Try: /negate {' '.join(str(l) for l in found)}")
         else:
-            print(f'\n  No combination flipped. Try /scale -1.0 (all layers, stronger alpha).')
+            print(f"\n  Try: /scale -1.0")
 
-    print()
+    print(f"{divider()}\n")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────
+
+HELP = """
+  /sweep <prompt>              Full analysis: alpha + layers + combos
+  /sensitivity <prompt>        Per-layer sensitivity
+  /sweep-layers 3 6 <prompt>   Alpha sweep on specific layers
+  /negate-all                  Negate all layers
+  /negate 0 3 6                Negate specific layers
+  /scale -1.0                  Scale all layers
+  /scale -1.0 0 3 6            Scale specific layers
+  /revert 0 3                  Revert layers to identity
+  /reset                       Reset all interventions
+  /compare                     Toggle compare mode
+  /tokens N                    Set max tokens
+  /help                        Show this help
+  /quit                        Exit
+"""
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description='Attention Manifolds — Interactive Inference')
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--calibrated', default=None)
     parser.add_argument('--max-tokens', type=int, default=200)
@@ -355,43 +313,47 @@ def main():
                         'mps' if torch.backends.mps.is_available() else 'cpu')
     args = parser.parse_args()
 
-    print(f'Loading model from {args.checkpoint}...')
-    model, tokenizer, meta = load_model(args.checkpoint, args.device)
-    print(f'Model: {meta["model"]}, {len(model.model.layers)} layers')
+    # Suppress transformers warnings
+    import logging
+    logging.getLogger('transformers').setLevel(logging.ERROR)
+
+    manifest = json.loads((Path(args.checkpoint) / 'manifest.json').read_text())
+    meta = manifest['metadata']
+    model_short = meta['model'].split('/')[-1]
+    n_layers = None
+
+    print(f"\n  Loading {model_short}...", end='', flush=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        meta['model'], dtype=torch.float32, attn_implementation='eager'
+    ).to(args.device).eval()
+    model.requires_grad_(False)
+    tokenizer = AutoTokenizer.from_pretrained(meta['model'])
+    load_splines(args.checkpoint, model)
+    n_layers = len(model.model.layers)
+    print(f" done ({n_layers} layers)")
 
     calibrated_coeffs = None
     if args.calibrated:
-        print(f'Loading calibrated from {args.calibrated}...')
+        print(f"  Loading calibrated...", end='', flush=True)
         cal_model = AutoModelForCausalLM.from_pretrained(
             meta['model'], dtype=torch.float32, attn_implementation='eager'
         ).to(args.device).eval()
         load_splines(args.calibrated, cal_model)
         calibrated_coeffs = {k: v.clone() for k, v in get_all_coefficients(cal_model).items()}
         del cal_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        clear_memory(args.device)
+        print(f" done")
 
     state = InterventionState(model, calibrated_coeffs)
     max_tokens = args.max_tokens
 
-    print(f'\nReady. Type a prompt, or a command starting with /.')
-    print(f'Commands:')
-    print(f'  /sensitivity <prompt>        Per-layer: which layers matter?')
-    print(f'  /sweep <prompt>              Alpha sweep: what scale to use? (all layers)')
-    print(f'  /sweep-layers 3 6 <prompt>   Alpha sweep on specific layers')
-    print(f'  /negate-all                  Set intervention: negate all layers')
-    print(f'  /negate 0 3 6                Set intervention: negate specific layers')
-    print(f'  /scale -1.0                  Set intervention: scale all layers')
-    print(f'  /scale -1.0 0 3 6            Set intervention: scale specific layers')
-    print(f'  /revert 0 3                  Set intervention: revert layers to identity')
-    print(f'  /off                         Turn off intervention')
-    print(f'  /compare                     Toggle compare mode (baseline + intervened)')
-    print(f'  /tokens N                    Set max generation tokens')
-    print(f'  /quit                        Exit\n')
+    print(f"\n  Ready. Type /help for commands.\n")
 
     while True:
         try:
-            line = input(f'[{state.describe()}] > ').strip()
+            status = state.status()
+            prompt_str = f"({status}) " if status else ''
+            line = input(f"  {prompt_str}> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -399,24 +361,22 @@ def main():
         if not line:
             continue
 
-        # Commands
         if line.startswith('/'):
             parts = line.split()
             cmd = parts[0].lower()
 
             if cmd in ('/quit', '/exit', '/q'):
                 break
-            elif cmd == '/off':
+            elif cmd == '/help':
+                print(HELP)
+            elif cmd in ('/reset', '/off'):
                 state.mode = 'off'
                 state._restore_all()
-                print('  Intervention OFF')
             elif cmd == '/negate-all':
                 state.mode = 'negate-all'
-                print(f'  Intervention: {state.describe()}')
             elif cmd == '/negate':
                 state.mode = 'negate'
                 state.layers = [int(x) for x in parts[1:]] if len(parts) > 1 else list(range(state.n_layers))
-                print(f'  Intervention: {state.describe()}')
             elif cmd == '/scale':
                 state.mode = 'scale'
                 if len(parts) > 1:
@@ -425,73 +385,67 @@ def main():
                     state.layers = [int(x) for x in parts[2:]]
                 else:
                     state.layers = list(range(state.n_layers))
-                print(f'  Intervention: {state.describe()}')
             elif cmd == '/revert':
                 state.mode = 'revert'
                 state.layers = [int(x) for x in parts[1:]] if len(parts) > 1 else list(range(state.n_layers))
-                print(f'  Intervention: {state.describe()}')
             elif cmd == '/compare':
                 state.compare = not state.compare
-                print(f'  Compare mode: {"ON" if state.compare else "OFF"}')
+                print(f"  Compare: {'on' if state.compare else 'off'}")
             elif cmd == '/tokens':
                 if len(parts) > 1:
                     max_tokens = int(parts[1])
-                print(f'  Max tokens: {max_tokens}')
+                    print(f"  Max tokens: {max_tokens}")
             elif cmd == '/sensitivity':
-                prompt = ' '.join(parts[1:]) if len(parts) > 1 else None
-                if not prompt:
-                    print('  Usage: /sensitivity How do I hotwire a car?')
-                else:
+                prompt = ' '.join(parts[1:])
+                if prompt:
                     run_sensitivity(model, tokenizer, state, prompt, args.device, max_tokens)
-            elif cmd == '/sweep':
-                prompt = ' '.join(parts[1:]) if len(parts) > 1 else None
-                if not prompt:
-                    print('  Usage: /sweep How do I hotwire a car?')
                 else:
+                    print("  Usage: /sensitivity <prompt>")
+            elif cmd == '/sweep':
+                prompt = ' '.join(parts[1:])
+                if prompt:
                     run_sweep(model, tokenizer, state, prompt, args.device, max_tokens)
+                else:
+                    print("  Usage: /sweep <prompt>")
             elif cmd == '/sweep-layers':
-                # Parse layer numbers then the rest is the prompt
                 layer_nums = []
                 prompt_parts = []
-                parsing_layers = True
+                parsing = True
                 for p in parts[1:]:
-                    if parsing_layers and p.isdigit():
+                    if parsing and p.isdigit():
                         layer_nums.append(int(p))
                     else:
-                        parsing_layers = False
+                        parsing = False
                         prompt_parts.append(p)
                 prompt = ' '.join(prompt_parts)
-                if not prompt or not layer_nums:
-                    print('  Usage: /sweep-layers 3 6 How do I hotwire a car?')
-                else:
+                if prompt and layer_nums:
                     run_sweep(model, tokenizer, state, prompt, args.device, max_tokens, layers=layer_nums)
+                else:
+                    print("  Usage: /sweep-layers 3 6 <prompt>")
             else:
-                print(f'  Unknown command: {cmd}')
+                print(f"  Unknown command. Type /help")
             continue
 
-        # Regular prompt
+        # Generate
         ids = encode_prompt(tokenizer, line, args.device)
 
         if state.compare and state.mode != 'off':
-            # Baseline
             state._restore_all()
             base_text = generate(model, tokenizer, ids, max_tokens, args.device)
-            print(f'\n  BASELINE [{classify(base_text)}]:')
-            print(f'  {base_text}\n')
+            print_response(base_text, classify(base_text), model_short, 'baseline')
 
-            # Intervened
             state.apply()
             edit_text = generate(model, tokenizer, ids, max_tokens, args.device)
             state._restore_all()
-            print(f'  {state.mode.upper()} [{classify(edit_text)}]:')
-            print(f'  {edit_text}\n')
+            print_response(edit_text, classify(edit_text), model_short, state.status())
         else:
             if state.mode != 'off':
                 state.apply()
             text = generate(model, tokenizer, ids, max_tokens, args.device)
             if state.mode != 'off':
                 state._restore_all()
-            print(f'\n  [{classify(text)}] {text}\n')
+            tag = state.status() if state.mode != 'off' else ''
+            print_response(text, classify(text), model_short, tag)
 
 
 if __name__ == '__main__':
