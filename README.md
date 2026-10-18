@@ -1,7 +1,7 @@
 # Attention Manifolds
 
 <p align="center">
-  <img src="assets/ai_safety.gif" alt="Interactive inference with spline interventions"/>
+  <img src="assets/BSplineInterventions.gif" alt="B-Spline Interventions on Transformer Attention"/>
 </p>
 
 **Learned B-spline coordinate curves for AI safety and mechanistic interpretability.**
