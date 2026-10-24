@@ -14,9 +14,9 @@
 
 .guide-button{background:#2a372e;border:1px solid #465b4d;color:#b7dec9;font-size:11px;font-weight:500;padding:5px 12px;border-radius:6px;cursor:pointer;flex-shrink:0;white-space:nowrap}.guide-button:hover{background:#35463b;border-color:#6f8878;color:#e0f7e6}
 .help-overlay{position:fixed;inset:0;z-index:200;background:#000a;backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center}
-.help-dialog{width:min(680px,92vw);max-height:85vh;background:#1e2220;border:1px solid #3b4e40;border-radius:16px;color:var(--text);padding:0;overflow:hidden;box-shadow:0 20px 60px #000a}
-.help-header{display:flex;justify-content:space-between;align-items:center;padding:20px 24px 16px;border-bottom:1px solid #303835}.help-header h2{font-family:Manrope,var(--font);font-size:18px;font-weight:600;margin:0;letter-spacing:-.5px}
-.help-body{padding:20px 24px 28px;overflow-y:auto;max-height:calc(85vh - 70px);scrollbar-width:thin;scrollbar-color:#3b403d transparent}
+.help-dialog{width:min(680px,92vw);max-height:85vh;background:#1e2220;border:1px solid #3b4e40;border-radius:16px;color:var(--text);padding:0;overflow:hidden;box-shadow:0 20px 60px #000a;display:flex;flex-direction:column}
+.help-header{display:flex;justify-content:space-between;align-items:center;padding:20px 24px 16px;border-bottom:1px solid #303835;flex-shrink:0}.help-header h2{font-family:Manrope,var(--font);font-size:18px;font-weight:600;margin:0;letter-spacing:-.5px}.help-header .icon-button{flex-shrink:0}
+.help-body{padding:20px 24px 28px;overflow-y:auto;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:#3b403d transparent}
 .help-body p{font-size:13px;line-height:1.7;color:#b0b8b2;margin:0 0 14px}.help-body h3{font-size:14px;font-weight:600;margin:20px 0 10px;color:#d1e9d9}.help-body ol,.help-body ul{font-size:13px;line-height:1.8;color:#b0b8b2;padding-left:20px;margin:0 0 14px}.help-body li{margin-bottom:4px}
 .help-body table{width:100%;border-collapse:collapse;font-size:11px;margin:10px 0 18px}.help-body th{text-align:left;padding:8px 10px;background:#262e28;color:#9aaa9e;font-weight:500;border-bottom:1px solid #3b4e40}.help-body td{padding:7px 10px;border-bottom:1px solid #2c352e;color:#c5dccb}.help-body td:first-child{font-weight:600;color:#b7dec9;width:30px}.help-body td:last-child{color:#9aaa9e;white-space:nowrap}
 .help-caution{background:#3a2c1e;border:1px solid #69543f;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12px;line-height:1.6;color:#ebc8a0}

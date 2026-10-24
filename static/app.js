@@ -162,6 +162,8 @@ try{const saved=JSON.parse(sessionStorage.getItem('manifolds-ab-v1'));if(saved&&
 if(state.mode==='baseline'){state.layers.clear();state.layerAlphas={};state.alpha=1;}
 buildLayers();updateSettings();syncDrawerAccessibility();pollStatus();
 $('openHelp').onclick=()=>{$('helpOverlay').hidden=false;};
+if($('openGuideLeft'))$('openGuideLeft').onclick=()=>{$('helpOverlay').hidden=false;};
+if($('openGuideRight'))$('openGuideRight').onclick=()=>{$('helpOverlay').hidden=false;};
 $('closeHelp').onclick=()=>{$('helpOverlay').hidden=true;};
 $('helpOverlay').onclick=e=>{if(e.target===$('helpOverlay'))$('helpOverlay').hidden=true;};
 document.querySelectorAll('.help-prompt[data-prompt]').forEach(b=>b.onclick=()=>{$('helpOverlay').hidden=true;$('prompt').value=b.dataset.prompt;resizeInput();$('prompt').focus();});
